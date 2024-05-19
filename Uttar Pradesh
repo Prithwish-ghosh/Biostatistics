@@ -1,1 +1,583 @@
+options(rstan.useNULL = TRUE) 
+library(StanHeaders)
+library(rstan)
+library(data.table)
+library(lubridate)
+library(gdata)
+library(EnvStats)
+
+#install.packages("macos-rtools-4.0.0.pkg", repos = NULL, type = "source")
+
+library(ggplot2)
+library(readr)
+#setwd("C:/Users/Tapomayee Basu/OneDrive/Documents/Bayes Project/COVID_KD/Code_India")
+#setwd("D:/Meghna/First work/")
+#setwd("C:/Users/PERSONAL/Dropbox/Meghna/First work/")
+
+countries="Tamilnadu"
+args = commandArgs(trailingOnly=TRUE)
+if(length(args) == 0) {
+  args = 'base_Gujrat'
+} 
+StanModel = args[1]
+
+print(sprintf("Running %s",StanModel))
+setwd("~/Downloads/Tamil Nadu mutations/")
+#setwd("~/Downloads") 
+## Reading all data
+d=read_csv("UP mutations.csv")
+dim(d)
+head(d)
+#d=d[-440,]
+#d$Cases.per.10.000=round(d$Cases.per.10.000*10000,0)
+#d$Deaths.per.10.000.=round(d$Deaths.per.10.000.*10000,0)
+d = data.frame(d)
+d = na.omit(d)
+tail(d$Date.of.collection)
+#d = na.omit(d[,c(1:6)])
+d$Collection.Dates
+summary(d$Daily.Cases)
+summary(d$Daily.Deaths)
+
+sum(is.finite(d$Daily.Deaths))
+sum(is.finite(d$Daily.Cases))
+dim(d)
+
+d$Daily.Cases= abs(d$Daily.Cases)
+d$Daily.Deaths=abs(d$Daily.Deaths)
+
+
+covariates=d[,c(4,5,6,37,50,170,193,265,434,437)]
+length(covariates)
+#covariates = data.frame(covariates[,c(1:3)])
+dim(d)
+length(covariates)
+summary(covariates)
+
+dim(covariates)
+head(covariates)
+sum(is.na(covariates$Markets..Shopping.complexes.and.malls))
+
+setwd("~/Downloads") 
+serial.interval = read.csv("serial_interval.csv")
+head(serial.interval)
+dim(serial.interval)
+dim(d)
+serial.interval = serial.interval[1:458,]
+#serial.interval = serial.interval[,c(1, 2)]
+#serial.interval = serial.interval[,c(1)]
+dim(d)
+#serial.interval = serial.interval[1:175,]
+head(serial.interval)
+dim(serial.interval)
+#serial.interval =data.frame(c(serial.interval$X , c(1:16)) ,c(serial.interval$fit , rep(4.440000e-16, 16)))
+
+#head(serial.interval)
+#dim(serial.interval)
+sum(is.na(serial.interval$fit))
+#serial.interval=serial.interval
+dim(serial.interval)
+head(serial.interval)
+##covariates = read.csv('data/interventions_ind.csv', stringsAsFactors = FALSE)
+##covariates <- covariates[1, c(1,2,3,4,5)]
+p <- ncol(covariates)
+p
+forecast = 0
+dim(d)
+DEBUG = FALSE
+if(DEBUG == FALSE) {
+  N2 = 458 # Increase this for a further forecast
+}  else  {
+  ### For faster runs:
+  N2 = 458
+}
+dates = list()
+dates=d$Date.of.collection
+reported_cases = list()
+stan_data = list(M=1,N= NULL,
+                 p=p,x1=poly(1:N2,2)[,1],
+                 x2=poly(1:N2,2)[,2],
+                 y=NULL,
+                 covariate1=NULL,
+                 covariate2=NULL,covariate3=NULL,covariate4=NULL,
+                 covariate5=NULL,covariate6=NULL,covariate7=NULL,covariate8=NULL,
+                 covariate9=NULL, covariate10=NULL,
+                 deaths=NULL,
+                 f=NULL,
+                 N0=10,
+                 cases=NULL,
+                 LENGTHSCALE=7
+                 ,SI=serial.interval$fit[1:N2]) # N0 = 6 to make it consistent with Rayleigh
+deaths_by_country = list()
+
+Country=countries
+Country
+
+stan_data$deaths
+sum(is.infinite(stan_data$SI))
+#CFR=cfr.by.country$weighted_fatality[cfr.by.country$country == Country]
+CFR=0.009185
+
+
+# hazard estimation
+N = length(d$Daily.Cases) #d
+N
+#print(sprintf("%s has %d days of data",Country,N))
+forecast = 15
+N2 = N+15
+N2
+h = rep(0,forecast+N) # discrete hazard rate from time t = 1, ..., 100
+h
+length(h)
+if(DEBUG) { # OLD -- but faster for testing this part of the code
+  mean = 18.8
+  cv = 0.45
+  
+  for(i in 1:length(h))
+    h[i] = (CFR*pgammaAlt(i,mean = mean,cv=cv) - CFR*pgammaAlt(i-1,mean = mean,cv=cv)) / (1-CFR*pgammaAlt(i-1,mean = mean,cv=cv))
+} else { # NEW
+  mean1 = 5.1; cv1 = 0.86; # infection to onset
+  mean2 = 18.8; cv2 = 0.45 # onset to death
+  ## assume that CFR is probability of dying given infection
+  x1 = rgammaAlt(5e6,mean1,cv1) # infection-to-onset ----> do all people who are infected get to onset?
+  x2 = rgammaAlt(5e6,mean2,cv2) # onset-to-death
+  f = ecdf(x1+x2)
+  convolution = function(u) (CFR * f(u))
+  
+  h[1] = (convolution(1.5) - convolution(0)) 
+  for(i in 2:length(h)) {
+    h[i] = (convolution(i+.5) - convolution(i-.5)) / (1-convolution(i-.5))
+  }
+}
+s = rep(0,N2)
+s[1] = 1 
+for(i in 2:N2) {
+  s[i] = s[i-1]*(1-h[i-1])
+}
+f = s * h
+f
+y=c(as.vector(as.numeric(d$Daily.Cases)),rep(-1,forecast))
+#reported_cases[[Country]] = as.vector(as.numeric(d1$cases))
+deaths=c(as.vector(as.numeric(d$Daily.Deaths)),rep(-1,forecast))
+
+cases=c(as.vector(as.numeric(d$Daily.Cases)),rep(-1,forecast))
+#deaths_by_country[[Country]] = as.vector(as.numeric(d1$deaths))
+covariates2 <- as.data.frame(covariates[, colnames(covariates)])
+dim(covariates2)
+# x=1:(N+forecast)
+covariates2[N:(N+forecast),] <- covariates2[N,]
+
+
+## append data
+stan_data$N = c(stan_data$N,N)
+
+stan_data$y = c(stan_data$y,y[1]) # just the index case!
+# stan_data$x = cbind(stan_data$x,x)
+stan_data$covariate1 = cbind(stan_data$covariate1,covariates2[,1])
+stan_data$covariate2 = cbind(stan_data$covariate2,covariates2[,2])
+stan_data$covariate3 = cbind(stan_data$covariate3,covariates2[,3])
+stan_data$covariate4 = cbind(stan_data$covariate4,covariates2[,4])
+stan_data$covariate5 = cbind(stan_data$covariate5,covariates2[,5])
+stan_data$covariate6 = cbind(stan_data$covariate6,covariates2[,6])
+stan_data$covariate7 = cbind(stan_data$covariate7,covariates2[,7])
+stan_data$covariate8 = cbind(stan_data$covariate8,covariates2[,8])
+stan_data$covariate9 = cbind(stan_data$covariate9,covariates2[,9])
+stan_data$covariate10 = cbind(stan_data$covariate10,covariates2[,10])
+
+
+stan_data$f = cbind(stan_data$f,f)
+stan_data$deaths = cbind(stan_data$deaths,deaths)
+stan_data$cases = cbind(stan_data$cases,cases)
+
+stan_data$deaths
+
+stan_data$N2=N2
+stan_data$x=1:N2
+if(length(stan_data$N) == 1) {
+  stan_data$N = as.array(stan_data$N)
+}
+
+length(stan_data$SI)
+
+
+if(DEBUG) {
+  write.csv(
+    data.frame(date=dates[[1]],
+               `Interstate.Transport`=stan_data$covariate1[1:stan_data$N,1],
+               `Intrastate.Transport`=stan_data$covariate2[1:stan_data$N,1],
+               `Markets..malls.and.shopping.complexes`=stan_data$covariate3[1:stan_data$N,1]),#,
+    #`Presence210`=stan_data$covariate4[1:stan_data$N,1],
+    #`Presence23403`=stan_data$covariate5[1:stan_data$N,1]) # ,
+    file=sprintf("results/%s-check-dates.csv",countries),row.names=F)
+}
+
+
+
+stan_data$y = t(stan_data$y)
+options(mc.cores = parallel::detectCores())
+rstan_options(auto_write = TRUE)
+
+stan_data$deaths
+
+#rstan_options(auto_write = T)
+m = stan_model(model_code = "
+  data {
+  int <lower=1> M; // number of countries
+  int <lower=1> N0; // number of days for which to impute infections
+  int<lower=1> N[M]; // days of observed data for country m. each entry must be <= N2
+  int<lower=1> N2; // days of observed data + number of days to forecast
+  real<lower=0> x[N2]; // index of days (starting at 1)
+ int cases[N2,M]; // reported cases
+  int deaths[N2, M]; // reported deaths -- the rows with i > N contain -1 and should be ignored
+  matrix[N2, M] f; // h * s
+  matrix[N2, M] covariate1;
+  matrix[N2, M] covariate2;
+  matrix[N2, M] covariate3;
+  matrix[N2, M] covariate4;
+  matrix[N2, M] covariate5;
+  matrix[N2, M] covariate6;
+   matrix[N2, M] covariate7;
+  matrix[N2, M] covariate8;
+  matrix[N2, M] covariate9;
+  matrix[N2, M] covariate10;
+  
+  real SI[N2]; // fixed pre-calculated SI using emprical data from Neil
+
+}
+
+transformed data {
+  real delta = 1e-5;
+
+}
+
+parameters {
+  real<lower=0> mu[M]; // intercept for Rt
+  real<lower=0> alpha[10]; // the hier term
+  real<lower=0> kappa;
+  real<lower=0> y[M];
+  real<lower=0> phi;
+  real<lower=0> tau;
+
+}
+
+transformed parameters {
+    real convolution;
+    matrix[N2, M] prediction = rep_matrix(0,N2,M);
+    matrix[N2, M] E_deaths  = rep_matrix(0,N2,M);
+    matrix[N2, M] Rt = rep_matrix(0,N2,M);
+    for (m in 1:M){
+      prediction[1:N0,m] = rep_vector(y[m],N0); // learn the number of cases in the first N0 days
+        Rt[,m] = mu[m] * exp(covariate1[,m] * (-alpha[1]) + covariate2[,m] * (-alpha[2]) +
+        covariate3[,m] * (-alpha[3]) + covariate4[,m] * (alpha[4]) + covariate5[,m] * (alpha[5]) + 
+        covariate6[,m]*(alpha[6]) + covariate7[,m] * (alpha[7]) + covariate8[,m] * (alpha[8]) + 
+        covariate9[,m] * (alpha[9]) + covariate10[,m] * (alpha[10])); 
+        // + GP[i]); // to_vector(x) * time_effect
+      for (i in (N0+1):N2) {
+        convolution=0;
+        for(j in 1:(i-1)) {
+          convolution += prediction[j, m]*SI[i-j]; // Correctd 22nd March
+        
+        }
+        
+        prediction[i, m] = Rt[i,m] * convolution;
+      
+      }
+      
+      
+      E_deaths[1, m]= 1e-9;
+      for (i in 2:N2){
+        E_deaths[i,m]= 0;
+        for(j in 1:(i-1)){
+          E_deaths[i,m] += prediction[j,m]*f[i-j,m];
+        
+        }
+        
+      }
+      
+    }
+   /* for(m in 1:M) {
+     for(i in 1:N[m]) {
+      LowerBound[i,m] = prediction[i,m] * 10 - cases[i,m];
+     }
+    }*/
+
+}
+model {
+  tau ~ exponential(0.03);
+  for (m in 1:M){
+      y[m] ~ exponential(1.0/tau);
+  }
+  
+  phi ~ exponential(1);
+  kappa ~ exponential(1);
+  mu ~ exponential(1); // citation needed 
+  alpha ~ gamma(1,1);
+  for(m in 1:M){
+    for(i in 1:N[m]){
+       deaths[i,m] ~ neg_binomial_2(E_deaths[i,m],phi); 
+       
+    }
+    
+   }
+   
+}
+
+generated quantities {
+    matrix[N2, M] lp0 = rep_matrix(1000,N2,M); // log-probability for LOO for the counterfactual model
+    matrix[N2, M] lp1 = rep_matrix(1000,N2,M); // log-probability for LOO for the main model
+    real convolution0;
+    matrix[N2, M] prediction0 = rep_matrix(0,N2,M);
+    matrix[N2, M] E_deaths0  = rep_matrix(0,N2,M);
+    for (m in 1:M){
+      prediction0[1:N0,m] = rep_vector(y[m],N0); // learn the number of cases in the first N0 days
+      for (i in (N0+1):N2) {
+        convolution0=0;
+        for(j in 1:(i-1)) {
+          convolution0 += prediction0[j, m]*SI[i-j]; // Correctd 22nd March
+        
+        }
+        prediction0[i, m] = mu[m] * convolution0;
+      
+      }
+      
+      E_deaths0[1, m]= 1e-9;
+      for (i in 2:N2){
+        E_deaths0[i,m]= 0;
+        for(j in 1:(i-1)){
+          E_deaths0[i,m] += prediction0[j,m]*f[i-j,m];
+        
+        }
+      }
+      for(i in 1:N[m]){
+        lp0[i,m] = neg_binomial_2_lpmf(deaths[i,m] | E_deaths[i,m],phi); 
+        lp1[i,m] = neg_binomial_2_lpmf(deaths[i,m] | E_deaths0[i,m],phi); 
+      }
+    }
+}
+
+")
+
+#m = stan_model("D:/Meghna/First work/stan_models/base_gujrat.stan")
+
+if(DEBUG) { 
+  fit = sampling(m,data=stan_data,iter=40,warmup=20,chains=3)
+} else { 
+  # fit = sampling(m,data=stan_data,iter=4000,warmup=2000,chains=8,thin=4,control = list(adapt_delta = 0.90, max_treedepth = 10))
+  fit = sampling(m,data=stan_data,iter=10000,warmup= 5000,chains=3,thin=4,control = list(adapt_delta = 0.90, max_treedepth = 10))
+}  
+
+out2 = rstan::extract(fit) # run upto this line
+dim(out2$alpha)
+
+
+TN_out_w_mut = out2
+
+UP_out_wo_mut
+UP_out_w_mutation = out2
+
+PN_out_wo_mut
+PN_out_w_mut
+
+Ker_out_wo_mut
+Ker_out_w_mut
+
+WB_out_wo_mut
+WB_out_w_mut
+
+
+MH_out_wo_mut
+MH_out_w_mut = out2
+
+Kar_out_wo_mut
+Kar_out_w_mut 
+
+save(Kar_out_w_mut, file = "kar_with_mut.RData")
+save(Kar_out_wo_mut, file = "kar_without_mut.RData")
+
+save(MH_out_w_mut, file = "MH_with_mut.RData")
+save(MH_out_wo_mut, file = "MH_without_mut.RData")
+
+save(WB_out_w_mut, file = "WB_with_mut.RData")
+save(WB_out_wo_mut, file = "WB_without_mut.RData")
+
+save(Ker_out_w_mut, file = "ker_with_mut.RData")
+save(Ker_out_wo_mut, file = "ker_without_mut.RData")
+
+save(PN_out_w_mut, file = "PN_with_mut.RData")
+save(PN_out_wo_mut, file = "PN_without_mut.RData")
+
+save(UP_out_w_mutation, file = "UP_with_mutation.RData")
+save(UP_out_wo_mut, file = "UP_without_mut.RData")
+
+save(TN_out_w_mut, file = "TN_with_mutation.RData")
+save(TN_out_wo_mut, file = "TN_without_mut.RData")
+
+save(Guj_out_w_mut, file = "Guj_with_mutation.RData")
+save(Guj_out_wo_mut, file = "Guj_without_mut.RData")
+
+
+
+dim(Kar_out_w_mut$Rt)
+
+
+
+
+
+GJ_out_w_mut = out2
+
+
+
+
+
+
+
+
+UP_out_wo_mut = out2
+UP_out_w_mut = out2
+
+
+dim(TN_out_w_mut$Rt)
+dim(Ker_out_wo_mut$Rt)
+dim(Guj_out_wo_mut$Rt)
+dim(PN_out_wo_mut$Rt)
+dim(WB_out_wo_mut$Rt)
+dim(UP_out_w_mut$Rt)
+dim(Kar_out_wo_mut$Rt)
+dim(MH_out_wo_mut$Rt)
+dim(d)
+
+
+
+
+#View(out1)
+dim(out1$Rt)
+
+
+
+plot(colMeans(out2$Rt) , type = "l")
+plot(colMeans(out2$E_deaths0) , type = "l")
+
+library(xtable)
+
+colMeans(Guj_out_w_mut$alpha)
+colMeans(Guj_out_wo_mut$alpha)
+
+colMeans(MH_out_w_mut$alpha)
+colMeans(MH_out_wo_mut$alpha)
+
+colMeans(Ker_out_w_mut$alpha)
+colMeans(Ker_out_wo_mut$alpha)
+
+colMeans(WB_out_w_mut$alpha)
+colMeans(WB_out_wo_mut$alpha)
+
+colMeans(Kar_out_w_mut$alpha)
+colMeans(Kar_out_wo_mut$alpha)
+
+colMeans(TN_out_w_mut$alpha)
+colMeans(TN_out_wo_mut$alpha)
+
+colMeans(PN_out_w_mut$alpha)
+colMeans(PN_out_wo_mut$alpha)
+
+colMeans(UP_out_w_mut$alpha)
+colMeans(UP_out_wo_mut$alpha)
+############################################################################
+
+prediction = out1$prediction
+
+estimated.deaths = out1$E_deaths
+estimated.deaths.cf = out1$E_deaths0
+
+View(estimated.deaths)
+dim(Kar_out_w_mut$alpha)
+###############################    cOMPLETED   ########################
+
+#JOBID = Sys.getenv("PBS_JOBID")
+#if(JOBID == "")
+#  JOBID = as.character(abs(round(rnorm(1) * 1000000)))
+#print(sprintf("Jobid = %s",JOBID))
+
+#save.image(paste0('Downloads/',StanModel,'-',JOBID,'.Rdata'))
+
+
+#save(fit,prediction,dates,reported_cases,deaths_by_country,countries,estimated.deaths,estimated.deaths.cf,out1,covariates,file=paste0('results/',StanModel,'-',JOBID,'-stanfit.Rdata'))
+#########################
+
+# to visualize results
+library(bayesplot)
+dim(MH_out_w_mut$alpha)
+#filename <- paste0('base-',JOBID)
+plot_labels <- c("Interstate",
+                 "Intrastate",
+                 "Market","Mut 31", "Mut 33", "Mut 47")
+
+alpha = (as.matrix(GJ_out_w_mut$alpha))
+alpha
+
+colnames(alpha) = plot_labels
+colnames(alpha)
+g = (mcmc_intervals(alpha, prob = .9))
+g
+#ggsave(sprintf("results/%s-covars-alpha-log.pdf",filename),g,width=4,height=6)
+g1 = (mcmc_intervals(alpha, prob = .9,transformations = function(x) exp(-x)))
+g1
+#ggsave(sprintf("results/%s-covars-alpha.pdf",filename),g,width=4,height=6)
+mu = (as.matrix(out2$mu))
+
+out2$mu
+
+colnames(mu) = "Gujrat"
+g = (mcmc_intervals(mu,prob = .9))
+g
+summary(mu)
+#ggsave(sprintf("results/%s-covars-mu.pdf",filename),g,width=4,height=6)
+dimensions <- dim(out2$Rt)
+
+out2$Rt
+
+Rt = (as.matrix(out2$Rt[,dimensions[3],]))
+colnames(Rt) = "Gujrat"
+h = (mcmc_intervals(Rt,prob = .9))
+h
+summary(Rt)
+
+#ggsave(sprintf("results/%s-covars-final-rt.pdf",filename),g,width=4,height=6)
+#system(paste0("Rscript plot-3-panel.r ", "base-533028",'.Rdata'))
+#system(paste0("Rscript plot-forecast.r ","base-533028",'.Rdata')) ## to run this code you will need to adjust manual values of forecast required
+
+tail(d$`Date of collection`)
+
+x=seq(as.Date("14/03/2020",format="%d/%m/%Y"),as.Date("15/06/2021",format="%d/%m/%Y"),by=1)
+
+dpre=data.frame(x,colMeans(UP_out_w_mut$prediction),colMeans(UP_out_w_mut$prediction0))
+
+plot(x,dpre$colMeans.UP_out_w_mut.prediction.,type="l",ylim=c(0,30000),ylab="Number of infected people",xlab="Date")
+lines(x,dpre$colMeans.UP_out_w_mut.prediction0.,col="red")
+abline(v=as.numeric(as.Date("04/04/2020",format="%d/%m/%Y")))
+dold=dpre[1:31,-3]
+
+
+dpre$colMeans.out1.prediction0.
+x
+dpre
+
+library(ggplot2)
+
+# Create the plot
+t = ggplot(dpre, aes(x = x, y = dpre$colMeans.out1.prediction.)) +
+  geom_line() +
+  labs(x = "date", y = "colMeans.out1.prediction.", title = "Infections Over Time") +
+  theme_minimal() + 
+  
+  # Format the date on the x-axis
+  scale_x_date(labels = scales::date_format("%Y-%m-%d"))
+
+t
+x = t + geom_line(data = dpre, aes(x = dpre$x, y = dpre$colMeans.out1.prediction0., color = "Dataset 2")) +
+  scale_color_manual(values = c("Dataset 2" = "red"))  # Customize the color as needed
+x
+
+plot(x , d$Daily.deaths)
+out1$prediction
 
